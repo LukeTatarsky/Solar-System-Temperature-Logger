@@ -5,6 +5,7 @@ from logging import basicConfig as logging_basicConfig, DEBUG as const_DEBUG, in
 from subprocess import call as subprocess_call
 import firebase_admin_file
 from os import chdir as os_chdir, path as os_path
+# used when running on system boot. 
 os_chdir(os_path.dirname(os_path.abspath(__file__)))
 
 SENSOR_NAMES = ReadingObj.SENSOR_NAMES
