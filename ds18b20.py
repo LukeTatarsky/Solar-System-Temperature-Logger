@@ -256,7 +256,7 @@ class DS18B20:
                 retries -= 1
                 log_event("list len {} | failed index {}    read retried.  retries remaining {}".format(str(len(lines)),str(index),str(retries)))
                 if (retries <= 8):
-                    send_notification('notify','read failed',f'sensor read failed. retries remaining{str(retries)}')
+                    send_notification('debug','read failed',f'{datetime.now().strftime("%a %I:%M %p")} Index {index}. retries remaining {str(retries)}')
             # read failed
             if len(lines) == 0:
                     log_event("read FAILED")               
@@ -280,6 +280,7 @@ class DS18B20:
             device_name = self.device_folder[index][-4:]
             temp = calibration(device_name,temp)
             if (temp > 90):
+                # "hot" is whats on other phone
                 send_notification('hot','Temperature limit exceeded', f"{ReadingObj()._sensor_mapping[device_name]} @ {round(temp,1)} C")
             return temp
         else:

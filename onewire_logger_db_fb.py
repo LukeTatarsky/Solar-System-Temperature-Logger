@@ -26,7 +26,7 @@ MAX_ERRORS = 10
 sqlite_file_1= '/home/luke/Desktop/Script/Output/shared_data.db'
 
 # Storage location 2 - SQLite - USB
-sqlite_file_2= '/media/pi/USB4G/Database/shared_data.db'
+sqlite_file_2= '/media/luke/USB4G/shared_data.db'
 
 # Storage location 3 - txt - local
 text_output_file = '/home/luke/Desktop/Script/Output/output.txt'
@@ -89,7 +89,7 @@ while True:
             error_count_sensors += 1
             if error_count_sensors >= MAX_ERRORS:
                 logging_info(f"_ERROR_ REBOOTING because detected only {num_of_sensors} / {SENSOR_COUNT} sensors.")
-                firebase_admin_file.send_notification('notify', 'error', f"REBOOTING because detected only {num_of_sensors} / {SENSOR_COUNT} sensors.")
+                firebase_admin_file.send_notification('debug', 'error', f"REBOOTING because detected only {num_of_sensors} / {SENSOR_COUNT} sensors.")
                 sleep(30)
                 subprocess_call('sudo reboot', shell=True)
             
@@ -119,16 +119,16 @@ while True:
 
         # Storage Location 1 - SQLite
         write_to_sql_lite(sqlite_file_1, sensor_vals_tuple)
-
-        # Storage Location 2 - SQLite USB
-        #write_to_sql_lite(sqlite_file_2, sensor_vals_tup)
-        
+      
         # Storage Location 3 - text file
         file_check(text_output_file)
         with open(text_output_file, 'a') as output_file:
             # write titles if required
             output_file.write(sensor_vals_string + "\n")
         output_file.close()
+        
+        # Storage Location 2 - SQLite USB
+        write_to_sql_lite(sqlite_file_2, sensor_vals_tuple)
 
         # Storage Location 4 - Firebase firestore
         '''
@@ -159,7 +159,7 @@ while True:
         if error_count_other >= MAX_ERRORS:
             logging_error(f"REBOOTING due to error count of {error_count_other}.")
             try:
-                firebase_admin_file.send_notification('notify', 'error', f"REBOOTING due to error count of {error_count_other}.")
+                firebase_admin_file.send_notification('debug', 'error', f"REBOOTING due to error count of {error_count_other}.")
             except:
                 logging_error(f"Failed to send notification")
                 pass
