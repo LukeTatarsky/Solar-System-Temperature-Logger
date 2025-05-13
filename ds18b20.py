@@ -4,6 +4,10 @@ from time import sleep, time
 from sqlite3 import connect as sqlite_connect
 from datetime import datetime
 from firebase_admin_file import send_notification
+from subprocess import call as subprocess_call
+sqlite_file_1= '/home/luke/Desktop/Script/Output/shared_data.db'
+
+HIGH_TEMP_THRESHOLD = 91.5
 
 class ReadingObj:
     """
@@ -14,16 +18,16 @@ class ReadingObj:
     """ 
     def __init__(self):
         self.date_time_now = time()
-        self.glycol_in_roof = None
-        self.glycol_in = None
-        self.glycol_out_st = None
-        self.glycol_out_he = None
-        self.solar_t_high = None
-        self.solar_t_mid = None
-        self.solar_t_low = None
-        self.boiler_t_mid = None
-        self.boiler_t_out = None
-        self.solar_t_out = None
+        self.glycol_in_roof = 0.01 # workaround to stop None from being written
+        self.glycol_in = 0.01
+        self.glycol_out_st = 0.01
+        self.glycol_out_he = 0.01
+        self.solar_t_high = 0.01
+        self.solar_t_mid = 0.01
+        self.solar_t_low = 0.01
+        self.boiler_t_mid = 0.01
+        self.boiler_t_out = 0.01
+        self.solar_t_out = 0.01
         self.ab = None
         self.cd = None
         self.ef = None
@@ -225,8 +229,13 @@ class DS18B20:
     def _read_temp(self,index):
         # Issue one read to one sensor
         # you should not call this directly
-        sleep(0.25)     
-        f = open(self._device_file[index],'r')
+        sleep(0.25)
+        try:
+            f = open(self._device_file[index],'r')
+        except:
+            # getting around FileNotFoundError preventing the retries in get_tempC
+            log_event(f"FileNotFoundError for index {index}")
+            return []
         lines = f.readlines()
         f.close()
         return lines
@@ -246,23 +255,36 @@ class DS18B20:
         """
         # read sensor temperature in degrees C
         lines = self._read_temp(index)
-        retries = 10
+        retries = 12
+        interval = 2
         # read failed. sensor file is empty. Try again.
         if len(lines) == 0:                        
             # retry a few times before giving up
             while (len(lines) == 0) and (retries > 0):                
-                sleep(2)            
-                lines = self._read_temp(index)
+                sleep(interval)
+                interval += 2
                 retries -= 1
+                lines = self._read_temp(index)
                 log_event("list len {} | failed index {}    read retried.  retries remaining {}".format(str(len(lines)),str(index),str(retries)))
-                if (retries <= 8):
+                if (retries <= 0):
                     send_notification('debug','read failed',f'{datetime.now().strftime("%a %I:%M %p")} Index {index}. retries remaining {str(retries)}')
             # read failed
             if len(lines) == 0:
-                    log_event("read FAILED")               
-                    return None
+                    log_event("get_tempC read FAILED")  
+                    #----------------  
+                    # attempt to prevent None from being written
+                    try:
+                        send_notification('debug', 'error', f'Rebooting @ {datetime.now().strftime("%a %I:%M %p")}. Sensor Failed to read.')
+                    except:
+                        log_event(f"Failed to send notification")
+                        pass
+                    sleep(60)
+                    log_event(f"Rebooting. Sensor Failed to read. Ultimate failure")
+                    subprocess_call('sudo reboot', shell=True)
+                    #-----------------
+                    #return None
         
-        retries = 5
+        retries = 10
         while (lines[0].strip()[-3:] != 'YES') and (retries > 0):
             # read failed so try again
             log_event(" file is not empty but 'YES' not found. trying again.  retries: {}".format(str(retries)))
@@ -279,9 +301,20 @@ class DS18B20:
             temp = float(temp)/1000
             device_name = self.device_folder[index][-4:]
             temp = calibration(device_name,temp)
-            if (temp > 90):
-                # "hot" is whats on other phone
-                send_notification('hot','Temperature limit exceeded', f"{ReadingObj()._sensor_mapping[device_name]} @ {round(temp,1)} C")
+            #print(temp)
+            
+            # avoid recording nonsensical values.
+            # TODO keep a running average and use that instead of this. 
+            # problem is with fast temp swings such as when system turns on or water turns on. 
+            # sensor can read -55 to 125.
+            
+            # FIXME this is not a good place to check for this.
+            # could lead to infinite loop. hasnt happened yet
+            if (temp < -60) or (temp > 150):
+                sleep(2)
+                log_event(f"nonsense temp value encountered at {device_name} and {temp}")
+                # retry
+                temp = self.get_tempC(index)
             return temp
         else:
             # error
@@ -347,6 +380,23 @@ def write_to_sql_lite(db_location, sensor_values):
     conn.close()
     return
 
+def get_last_known_value_sql(db_location, index):
+    '''
+    When sensor fails to read, retrieve last value from db to prevent None from being written to db.
+    '''
+    conn = sqlite_connect(db_location)
+    c = conn.cursor()
+    column_name = ReadingObj.SENSOR_NAMES[index]
+    c.execute(f'SELECT {column_name} from temperature ORDER BY "Date" DESC LIMIT 1;')
+    result = c.fetchone()    
+    conn.commit()
+    conn.close()
+    if result:
+        return result[0]
+    else:
+        log_event("Failed to retrieve from DB")
+        return None
+
 def read_sensors(sensor_obj, previousReadingObj, date_time_now, num_of_sensors, ROUNDING):
     '''
     -------------------------------------------------------
@@ -360,27 +410,69 @@ def read_sensors(sensor_obj, previousReadingObj, date_time_now, num_of_sensors, 
     '''
     reading_obj = ReadingObj()
     reading_obj.date_time_now = date_time_now
+    RETRIES = 5
     # read each sensor
+    #print(f"{num_of_sensors}")
     i = 0
     while i < num_of_sensors:
         # get sensor name and value
         s_name = sensor_obj.get_device_name(i)
-        temp_value = sensor_obj.get_tempC(i)
-
-        if temp_value is not None:
+        s_value = sensor_obj.get_tempC(i)
+        
+                    # Overheating notification
+        # get a second reading beore sending a notification
+        if (s_value > HIGH_TEMP_THRESHOLD):
+            s_value = sensor_obj.get_tempC(i)
+            if (s_value > HIGH_TEMP_THRESHOLD):
+                send_notification('hot','Temperature limit exceeded', f"{reading_obj._sensor_mapping[s_name]} reported {round(s_value, ROUNDING)} C")
+        #print (f"{i+1} {reading_obj._sensor_mapping[s_name]} {s_value}")
+        if s_value is not None:
             # temp read succesfully
-            s_value = round(temp_value, ROUNDING) 
+            s_value = round(s_value, ROUNDING) 
         else:
             # read failed
-            if previousReadingObj is not None:                
-                s_value = getattr(previousReadingObj, previousReadingObj._sensor_mapping[s_name])
-                log_event("Sensor read FAILED.  Retrieving last known temperature of {}  {}".format(previousReadingObj._sensor_mapping[s_name], s_value))
-            else:
-                log_event("Sensor read FAILED.  previousReadingObj is None. Need to fetch from DB ")
+            log_event("Sensor read FAILED.  previousReadingObj is None. Fetching from DB ")
+            s_value = get_last_known_value_sql(sqlite_file_1, i)
+            log_event(f"retrieved from DB  {s_name} = {s_value}")  
+            # if previousReadingObj is not None:
+            #     # get value from previous value held in memory          
+            #     s_value = getattr(previousReadingObj, previousReadingObj._sensor_mapping[s_name])
+            #     log_event("Sensor read FAILED.  Retrieving last known temperature of {}  {}".format(previousReadingObj._sensor_mapping[s_name], s_value))
+            # else:
+            #     log_event("Sensor read FAILED.  previousReadingObj is None. Fetching from DB ")
+            #     s_value = get_last_known_value_sql(sqlite_file_1, i)
+            #     log_event(f"retrieved from DB  {s_name} = {s_value}")                
+
+        
+        # if its still None for some reason
+        if s_value is None:
+            # still failed, try again .
+            j = 0
+            while s_value is None and j < RETRIES:
+                log_event("Sensor read FAILED.  Retrying read again ")
+                sleep(10)
+                s_value = sensor_obj.get_tempC(i)
+                j += 1
+                
+            if s_value is None:
+                # Ultimate failure. Reboot.
+                # FIXME  Handle all read errors in one place.  logging is now broken.
+                try:
+                    send_notification('debug', 'error', f'Reboot @ {datetime.now().strftime("%a %I:%M %p")}. Ultimate sensor read failure.')
+                except:
+                    log_event(f"Failed to send notification")
+                    pass
+                sleep(60)
+                log_event(f"Rebooting. Sensor Failed to read. Ultimate failure")
+                subprocess_call('sudo reboot', shell=True)
+
         # set the correct variable in reading object
+        #print (f'{i} {reading_obj._sensor_mapping[s_name]} = {s_value}')
+        if s_value is None:
+            send_notification('debug', 'error', f'NULL got through {datetime.now().strftime("%a %I:%M %p")}')
         setattr(reading_obj, reading_obj._sensor_mapping[s_name], s_value)
         i += 1      
-
+        #print(reading_obj._sensor_mapping[s_name], " ", s_value)
     return reading_obj
     
 def calibration(name, temp_c):
